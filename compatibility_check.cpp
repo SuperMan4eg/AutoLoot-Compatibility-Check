@@ -19,6 +19,7 @@ namespace {
 constexpr wchar_t kGameExecutable[] = L"ACOdyssey.exe";
 constexpr wchar_t kReportName[] = L"AutoLootCompatibilityReport.txt";
 constexpr std::size_t kSha256Size = 32;
+constexpr unsigned kToolVersion = 2;
 
 struct KnownBuild {
     std::string_view name;
@@ -173,6 +174,50 @@ std::vector<std::uint32_t> FindExecutableMatches(const std::vector<std::uint8_t>
     return matches;
 }
 
+bool IsRelocationByte(std::string_view name, std::size_t index) {
+    if (name == "interaction_wrapper") return index >= 20 && index <= 23;
+    if (name == "game_update") return index >= 19 && index <= 22;
+    if (name == "get_targeting") {
+        return (index >= 10 && index <= 13) || (index >= 23 && index <= 26);
+    }
+    if (name == "interaction_emitter") return index >= 19 && index <= 22;
+    return false;
+}
+
+bool MaskedEqual(const std::uint8_t* candidate, const ReferenceSignature& signature) {
+    for (std::size_t index = 0; index < signature.bytes.size(); ++index) {
+        if (!IsRelocationByte(signature.name, index) && candidate[index] != signature.bytes[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::uint32_t> FindMaskedExecutableMatches(const std::vector<std::uint8_t>& file,
+                                                       const PeInfo& pe,
+                                                       const ReferenceSignature& signature) {
+    std::vector<std::uint32_t> matches;
+    constexpr std::size_t kMaxReportedMatches = 64;
+    for (std::uint16_t index = 0; index < pe.sectionCount; ++index) {
+        const auto& section = pe.sections[index];
+        if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            section.PointerToRawData >= file.size()) continue;
+        const std::size_t begin = section.PointerToRawData;
+        const std::size_t available = file.size() - begin;
+        const std::size_t length = std::min<std::size_t>(section.SizeOfRawData, available);
+        if (length < signature.bytes.size()) continue;
+        const std::size_t finalOffset = begin + length - signature.bytes.size();
+        for (std::size_t offset = begin; offset <= finalOffset; ++offset) {
+            if (file[offset] != signature.bytes[0]) continue;
+            if (!MaskedEqual(file.data() + offset, signature)) continue;
+            const auto delta = offset - section.PointerToRawData;
+            matches.push_back(section.VirtualAddress + static_cast<std::uint32_t>(delta));
+            if (matches.size() >= kMaxReportedMatches) return matches;
+        }
+    }
+    return matches;
+}
+
 std::filesystem::path ModuleDirectory() {
     std::wstring buffer(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -198,7 +243,7 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
         return 2;
     }
     report << "AutoLoot compatibility report\r\n"
-           << "tool_version=1\r\n"
+           << "tool_version=" << kToolVersion << "\r\n"
            << "read_only=true\r\n";
 
     std::ifstream input(executablePath, std::ios::binary | std::ios::ate);
@@ -279,8 +324,11 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
             report << "signature." << signature.name << ".bytes_at_steam_rva=unmapped\r\n";
         }
         const auto matches = FindExecutableMatches(file, *pe, signature.bytes.data(), signature.bytes.size());
+        const auto maskedMatches = FindMaskedExecutableMatches(file, *pe, signature);
         report << "signature." << signature.name << ".exact48_count=" << matches.size() << "\r\n"
-               << "signature." << signature.name << ".exact48_rvas=" << JoinRvas(matches) << "\r\n";
+               << "signature." << signature.name << ".exact48_rvas=" << JoinRvas(matches) << "\r\n"
+               << "signature." << signature.name << ".masked48_count=" << maskedMatches.size() << "\r\n"
+               << "signature." << signature.name << ".masked48_rvas=" << JoinRvas(maskedMatches) << "\r\n";
     }
 
     const std::array<std::uint8_t, 16> wrapperPrologue{
@@ -310,4 +358,3 @@ int wmain(int argc, wchar_t** argv) {
         : toolDirectory / kGameExecutable;
     return Run(executablePath, toolDirectory / kReportName);
 }
-
