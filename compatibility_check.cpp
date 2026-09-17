@@ -20,7 +20,7 @@ namespace {
 constexpr std::array<std::wstring_view, 2> kGameExecutables{{L"ACOdyssey.exe", L"ACOdyssey_plus.exe"}};
 constexpr wchar_t kReportName[] = L"AutoLootCompatibilityReport.txt";
 constexpr std::size_t kSha256Size = 32;
-constexpr unsigned kToolVersion = 9;
+constexpr unsigned kToolVersion = 10;
 
 struct KnownBuild {
     std::string_view name;
@@ -186,6 +186,31 @@ std::optional<std::size_t> RvaToOffset(const PeInfo& pe, std::uint32_t rva,
     return std::nullopt;
 }
 
+
+struct Rel32Resolution {
+    std::uint32_t sourceRva{};
+    std::uint32_t resolvedRva{};
+    unsigned depth{};
+};
+
+std::optional<Rel32Resolution> ResolveRel32JumpChain(
+        const std::vector<std::uint8_t>& file, const PeInfo& pe,
+        std::uint32_t sourceRva, unsigned maxDepth = 4) {
+    std::uint32_t current = sourceRva;
+    unsigned depth = 0;
+    for (; depth < maxDepth; ++depth) {
+        const auto offset = RvaToOffset(pe, current, 5, file.size());
+        if (!offset || file[*offset] != 0xE9) break;
+        std::int32_t displacement = 0;
+        std::memcpy(&displacement, file.data() + *offset + 1, sizeof(displacement));
+        const std::int64_t next = static_cast<std::int64_t>(current) + 5 + displacement;
+        if (next < 0 || next > 0xFFFFFFFFLL || next == current) return std::nullopt;
+        current = static_cast<std::uint32_t>(next);
+    }
+    if (depth == 0 || !RvaToOffset(pe, current, 1, file.size())) return std::nullopt;
+    return Rel32Resolution{sourceRva, current, depth};
+}
+
 std::vector<std::uint32_t> FindExecutableMatches(const std::vector<std::uint8_t>& file,
                                                  const PeInfo& pe,
                                                  const std::uint8_t* pattern,
@@ -306,6 +331,32 @@ std::string JoinRvas(const std::vector<std::uint32_t>& rvas) {
         out << Hex32(rvas[i]);
     }
     return out.str();
+}
+
+
+void WriteRel32Resolution(std::ofstream& report,
+                          const std::vector<std::uint8_t>& file,
+                          const PeInfo& pe,
+                          std::string_view key,
+                          std::uint32_t sourceRva,
+                          const ReferenceSignature* signature = nullptr) {
+    const auto resolution = ResolveRel32JumpChain(file, pe, sourceRva);
+    report << key << ".jump_rel32=" << (resolution ? "true" : "false") << "\r\n";
+    if (!resolution) return;
+    report << key << ".jump_depth=" << resolution->depth << "\r\n"
+           << key << ".resolved_rva=" << Hex32(resolution->resolvedRva) << "\r\n";
+    const auto bytes = RvaToOffset(pe, resolution->resolvedRva, 128, file.size());
+    report << key << ".resolved_bytes128="
+           << (bytes ? Hex(file.data() + *bytes, 128) : "unmapped") << "\r\n";
+    if (signature != nullptr) {
+        const auto sigOffset = RvaToOffset(pe, resolution->resolvedRva,
+                                           signature->bytes.size(), file.size());
+        const bool exact = sigOffset && std::equal(signature->bytes.begin(), signature->bytes.end(),
+                                                   file.begin() + static_cast<std::ptrdiff_t>(*sigOffset));
+        const bool masked = sigOffset && MaskedEqual(file.data() + *sigOffset, *signature);
+        report << key << ".resolved_exact48_match=" << (exact ? "true" : "false") << "\r\n"
+               << key << ".resolved_masked48_match=" << (masked ? "true" : "false") << "\r\n";
+    }
 }
 
 void WriteCandidateWindows(std::ofstream& report,
@@ -446,6 +497,8 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
         } else {
             report << "probe." << probe.name << ".bytes64=unmapped\r\n";
         }
+        WriteRel32Resolution(report, file, *pe,
+                             "probe." + std::string(probe.name), probe.steamRva);
     }
 
     for (const auto& signature : kReferenceSignatures) {
@@ -457,6 +510,9 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
         } else {
             report << "signature." << signature.name << ".bytes_at_steam_rva=unmapped\r\n";
         }
+        WriteRel32Resolution(report, file, *pe,
+                             "signature." + std::string(signature.name),
+                             signature.steamRva, &signature);
         const auto matches = FindExecutableMatches(file, *pe, signature.bytes.data(), signature.bytes.size());
         const auto maskedMatches = FindMaskedExecutableMatches(file, *pe, signature);
         report << "signature." << signature.name << ".exact48_count=" << matches.size() << "\r\n"
@@ -649,8 +705,10 @@ ReportSummary SummarizeReport(const std::filesystem::path& path) {
         const std::string base = "signature." + std::string(name);
         const unsigned exact = ReportCount(lines, base + ".exact48_count");
         const unsigned masked = ReportCount(lines, base + ".masked48_count");
-        const unsigned effective = exact != 0 ? exact : masked;
-        summary.signatureStates[index] = CandidateState(effective);
+        const bool resolvedMatch = ReportValue(lines, base + ".resolved_masked48_match").value_or("false") == "true";
+        const unsigned effective = exact != 0 ? exact : (masked != 0 ? masked : (resolvedMatch ? 1U : 0U));
+        summary.signatureStates[index] = resolvedMatch && exact == 0 && masked == 0
+            ? "resolved_unique" : CandidateState(effective);
         ClassifyCandidateCount(effective, summary.signatureUnique,
                                summary.signatureAmbiguous, summary.signatureMissing);
     }

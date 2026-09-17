@@ -3,7 +3,7 @@ AUTOLOOT COMPATIBILITY CHECK v9
 This tool only reads Assassin's Creed Odyssey executable files. It does not
 start or modify the game, install a hook, change memory, or alter game files.
 
-Version 9 automatically checks both names when they exist in the game folder:
+Version 10 automatically checks both names when they exist in the game folder:
   ACOdyssey.exe
   ACOdyssey_plus.exe
 
@@ -18,7 +18,8 @@ No file selection or renaming is required. If both EXE files are present, both
 are scanned and stored in one report as scan.0.*, scan.1.*, etc.
 
 The report separates binary-profile support from runtime filename support and
-includes a compact porting summary for Game Pass / ACOdyssey_plus.exe and older
+resolves E9 rel32 trampolines to their final code RVA and includes a compact
+porting summary for Game Pass / ACOdyssey_plus.exe and older
 1.5.3 builds.
 
 Do not send or upload ACOdyssey.exe or ACOdyssey_plus.exe.
