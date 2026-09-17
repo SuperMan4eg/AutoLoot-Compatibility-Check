@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -16,10 +17,10 @@
 
 namespace {
 
-constexpr wchar_t kGameExecutable[] = L"ACOdyssey.exe";
+constexpr std::array<std::wstring_view, 2> kGameExecutables{{L"ACOdyssey.exe", L"ACOdyssey_plus.exe"}};
 constexpr wchar_t kReportName[] = L"AutoLootCompatibilityReport.txt";
 constexpr std::size_t kSha256Size = 32;
-constexpr unsigned kToolVersion = 2;
+constexpr unsigned kToolVersion = 9;
 
 struct KnownBuild {
     std::string_view name;
@@ -28,10 +29,12 @@ struct KnownBuild {
     bool supported;
 };
 
-constexpr std::array<KnownBuild, 3> kKnownBuilds{{
+constexpr std::array<KnownBuild, 5> kKnownBuilds{{
     {"steam_1_5_6", "AC327DAD2CBBDD72A3FDA8E99CBEAB9D12AF328363E4F09BC5674BDD36B8C483", 286453072ULL, true},
-    {"ubisoft_connect_1_5_6_candidate", "3CB92F72823DB2C5EC24B77ADCD2325C9E1C61DBDB3E7EEA87151374F49B1A07", 285838672ULL, false},
+    {"ubisoft_connect_1_5_6", "3CB92F72823DB2C5EC24B77ADCD2325C9E1C61DBDB3E7EEA87151374F49B1A07", 285838672ULL, true},
     {"game_1_5_3_candidate", "3453FC6A34792F5C1D71053B7BAB7446E700DAF347F2575E1E8B25006F33F400", 285195944ULL, false},
+    {"gamepass_plus_1_5_6_candidate", "422439DA0C0F282B29C6C17F3BDC7B3D81B624B7ACEC2B9C69AED2CA22896560", 501398864ULL, false},
+    {"steam_1_5_6_longer_draw_distance_candidate", "72BEF41A699ED58EE326262FB8621BF118EA9767B5C9B1BC642668F81A738351", 286453072ULL, false},
 }};
 
 struct ReferenceSignature {
@@ -39,6 +42,45 @@ struct ReferenceSignature {
     std::uint32_t steamRva;
     std::array<std::uint8_t, 48> bytes;
 };
+
+struct StaticProbe {
+    std::string_view name;
+    std::uint32_t steamRva;
+};
+
+constexpr std::array<StaticProbe, 31> kStaticProbes{{
+    {"activation_logic_component", 0x43AD428U},
+    {"interact_component", 0x43AA2C0U},
+    {"visual", 0x40C28C8U},
+    {"visual_proxy_component", 0x40C6898U},
+    {"animus_pulse_component", 0x439F900U},
+    {"reward_component", 0x43AC3A8U},
+    {"sound_component", 0x41B3358U},
+    {"fx_component", 0x4190FF8U},
+    {"rigid_body_component", 0x4106C50U},
+    {"guidance_system", 0x416A9E8U},
+    {"rack_component_4397f28", 0x4397F28U},
+    {"rack_component_43979a8", 0x43979A8U},
+    {"rack_component_4152998", 0x4152998U},
+    {"rack_component_41b2d08", 0x41B2D08U},
+    {"rack_component_4134cb8", 0x4134CB8U},
+    {"rack_component_4159860", 0x4159860U},
+    {"rack_variant_component_414ffe8", 0x414FFE8U},
+    {"rack_variant_component_414fc10", 0x414FC10U},
+    {"ammo_rack_component_418d188", 0x418D188U},
+    {"icon_offset_component", 0x4417AE8U},
+    {"eagle_vision_component", 0x43CC248U},
+    {"skeleton_component", 0x40FEEE8U},
+    {"anim_component", 0x4100438U},
+    {"extended_reach_spatial_filter", 0x36A9870U},
+    {"extended_reach_target_range_filter", 0x36A99D0U},
+    {"extended_reach_world_transform", 0x00A608C0U},
+    {"extended_reach_target_range_callsite", 0x36AE0C0U},
+    {"extended_reach_spatial_callsite_1", 0x36B5907U},
+    {"extended_reach_spatial_callsite_2", 0x36B5A98U},
+    {"extended_reach_spatial_callsite_3", 0x36B5BD7U},
+    {"extended_reach_spatial_callsite_4", 0x36B5E0FU},
+}};
 
 constexpr std::array<ReferenceSignature, 5> kReferenceSignatures{{
     {"interaction_wrapper", 0x3458E20U, {0x40,0x53,0x48,0x83,0xEC,0x20,0x48,0x8B,0x49,0x38,0x48,0x8B,0xDA,0x49,0x8B,0xD0,0x48,0x8B,0x09,0xE8,0x88,0x09,0x00,0x00,0x88,0x03,0x48,0x83,0xC4,0x20,0x5B,0xC3,0x48,0x89,0x5C,0x24,0x08,0x57,0x48,0x83,0xEC,0x20,0x48,0x8B,0xD9,0xE8,0x3E,0xED}},
@@ -218,6 +260,36 @@ std::vector<std::uint32_t> FindMaskedExecutableMatches(const std::vector<std::ui
     return matches;
 }
 
+std::vector<std::uint32_t> FindRelativeCallSites(const std::vector<std::uint8_t>& file,
+                                                 const PeInfo& pe,
+                                                 std::uint32_t targetRva) {
+    std::vector<std::uint32_t> matches;
+    constexpr std::size_t kMaxReportedMatches = 64;
+    for (std::uint16_t index = 0; index < pe.sectionCount; ++index) {
+        const auto& section = pe.sections[index];
+        if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            section.PointerToRawData >= file.size()) continue;
+        const std::size_t begin = section.PointerToRawData;
+        const std::size_t available = file.size() - begin;
+        const std::size_t length = std::min<std::size_t>(section.SizeOfRawData, available);
+        if (length < 5) continue;
+        for (std::size_t offset = begin; offset <= begin + length - 5; ++offset) {
+            if (file[offset] != 0xE8) continue;
+            std::int32_t displacement = 0;
+            std::memcpy(&displacement, file.data() + offset + 1, sizeof(displacement));
+            const std::uint64_t callRva = static_cast<std::uint64_t>(section.VirtualAddress) +
+                                          (offset - begin);
+            const std::int64_t destination = static_cast<std::int64_t>(callRva + 5) +
+                                             displacement;
+            if (destination == static_cast<std::int64_t>(targetRva)) {
+                matches.push_back(static_cast<std::uint32_t>(callRva));
+                if (matches.size() >= kMaxReportedMatches) return matches;
+            }
+        }
+    }
+    return matches;
+}
+
 std::filesystem::path ModuleDirectory() {
     std::wstring buffer(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -236,6 +308,51 @@ std::string JoinRvas(const std::vector<std::uint32_t>& rvas) {
     return out.str();
 }
 
+void WriteCandidateWindows(std::ofstream& report,
+                           const std::vector<std::uint8_t>& file,
+                           const PeInfo& pe,
+                           std::string_view label,
+                           const std::vector<std::uint32_t>& rvas,
+                           std::size_t windowSize = 128) {
+    report << "candidate." << label << ".count=" << rvas.size() << "\r\n";
+    for (std::size_t index = 0; index < rvas.size(); ++index) {
+        report << "candidate." << label << '.' << index << ".rva="
+               << Hex32(rvas[index]) << "\r\n";
+        const auto offset = RvaToOffset(pe, rvas[index], windowSize, file.size());
+        if (offset) {
+            report << "candidate." << label << '.' << index << ".bytes"
+                   << windowSize << '=' << Hex(file.data() + *offset, windowSize) << "\r\n";
+        } else {
+            report << "candidate." << label << '.' << index << ".bytes"
+                   << windowSize << "=unmapped\r\n";
+        }
+    }
+}
+
+void WriteCandidateCallers(std::ofstream& report,
+                           const std::vector<std::uint8_t>& file,
+                           const PeInfo& pe,
+                           std::string_view label,
+                           const std::vector<std::uint32_t>& targets) {
+    for (std::size_t index = 0; index < targets.size(); ++index) {
+        const auto callers = FindRelativeCallSites(file, pe, targets[index]);
+        report << "xref." << label << '.' << index << ".target_rva="
+               << Hex32(targets[index]) << "\r\n"
+               << "xref." << label << '.' << index << ".count="
+               << callers.size() << "\r\n"
+               << "xref." << label << '.' << index << ".call_rvas="
+               << JoinRvas(callers) << "\r\n";
+        std::vector<std::uint32_t> windows;
+        windows.reserve(callers.size());
+        for (const auto caller : callers) {
+            windows.push_back(caller >= 32 ? caller - 32 : caller);
+        }
+        WriteCandidateWindows(report, file, pe,
+                              std::string(label) + "_caller_" + std::to_string(index),
+                              windows, 96);
+    }
+}
+
 int Run(const std::filesystem::path& executablePath, const std::filesystem::path& reportPath) {
     std::ofstream report(reportPath, std::ios::binary | std::ios::trunc);
     if (!report) {
@@ -248,7 +365,7 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
 
     std::ifstream input(executablePath, std::ios::binary | std::ios::ate);
     if (!input) {
-        report << "result=error\r\nerror=cannot_open_ACOdyssey_exe\r\n";
+        report << "result=error\r\nerror=cannot_open_executable\r\n";
         std::wcerr << L"Cannot open: " << executablePath << L"\n";
         return 3;
     }
@@ -264,7 +381,7 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
         return 5;
     }
 
-    report << "file_name=ACOdyssey.exe\r\nfile_size=" << file.size() << "\r\n";
+    report << "file_name=" << executablePath.filename().string() << "\r\nfile_size=" << file.size() << "\r\n";
     const auto digest = Sha256(file.data(), file.size());
     if (!digest) {
         report << "result=error\r\nerror=sha256_failed\r\n";
@@ -280,8 +397,13 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
             break;
         }
     }
+    const bool binaryProfileSupported = known != nullptr && known->supported;
+    const bool runtimeFilenameSupported = executablePath.filename().wstring() == L"ACOdyssey.exe";
+    const bool currentlySupported = binaryProfileSupported && runtimeFilenameSupported;
     report << "known_build=" << (known != nullptr ? known->name : "unknown_or_modified") << "\r\n"
-           << "currently_supported=" << (known != nullptr && known->supported ? "true" : "false") << "\r\n";
+           << "binary_profile_supported=" << (binaryProfileSupported ? "true" : "false") << "\r\n"
+           << "runtime_filename_supported=" << (runtimeFilenameSupported ? "true" : "false") << "\r\n"
+           << "currently_supported=" << (currentlySupported ? "true" : "false") << "\r\n";
 
     const auto pe = ParsePe(file);
     if (!pe) {
@@ -314,6 +436,18 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
         }
     }
 
+    constexpr std::size_t kProbeSize = 64;
+    for (const auto& probe : kStaticProbes) {
+        const auto offset = RvaToOffset(*pe, probe.steamRva, kProbeSize, file.size());
+        report << "probe." << probe.name << ".steam_rva=" << Hex32(probe.steamRva) << "\r\n";
+        if (offset) {
+            report << "probe." << probe.name << ".bytes64="
+                   << Hex(file.data() + *offset, kProbeSize) << "\r\n";
+        } else {
+            report << "probe." << probe.name << ".bytes64=unmapped\r\n";
+        }
+    }
+
     for (const auto& signature : kReferenceSignatures) {
         const auto offset = RvaToOffset(*pe, signature.steamRva, signature.bytes.size(), file.size());
         report << "signature." << signature.name << ".steam_rva=" << Hex32(signature.steamRva) << "\r\n";
@@ -329,32 +463,323 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
                << "signature." << signature.name << ".exact48_rvas=" << JoinRvas(matches) << "\r\n"
                << "signature." << signature.name << ".masked48_count=" << maskedMatches.size() << "\r\n"
                << "signature." << signature.name << ".masked48_rvas=" << JoinRvas(maskedMatches) << "\r\n";
+        if (signature.name == "interaction_wrapper" ||
+            signature.name == "interaction_emitter") {
+            WriteCandidateWindows(report, file, *pe, signature.name, maskedMatches);
+            WriteCandidateCallers(report, file, *pe, signature.name, maskedMatches);
+        }
     }
 
     const std::array<std::uint8_t, 16> wrapperPrologue{
         0x40,0x53,0x48,0x83,0xEC,0x20,0x48,0x8B,0x49,0x38,0x48,0x8B,0xDA,0x49,0x8B,0xD0};
     const std::array<std::uint8_t, 16> updatePrologue{
         0x48,0x89,0x5C,0x24,0x10,0x55,0x56,0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xEC,0x40};
+    const std::array<std::uint8_t, 18> spatialFilterPrologue{
+        0x40,0x55,0x56,0x57,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x83,0xEC,0x58,
+        0x41,0x8B,0x68,0x08};
+    const std::array<std::uint8_t, 19> targetRangeFilterPrologue{
+        0x4C,0x8B,0xDC,0x55,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x81,
+        0xEC,0xF8,0x00,0x00,0x00};
     const auto wrapperMatches = FindExecutableMatches(file, *pe, wrapperPrologue.data(), wrapperPrologue.size());
     const auto updateMatches = FindExecutableMatches(file, *pe, updatePrologue.data(), updatePrologue.size());
+    const auto spatialFilterMatches = FindExecutableMatches(
+        file, *pe, spatialFilterPrologue.data(), spatialFilterPrologue.size());
+    const auto targetRangeFilterMatches = FindExecutableMatches(
+        file, *pe, targetRangeFilterPrologue.data(), targetRangeFilterPrologue.size());
     report << "hook.wrapper_prefix16_count=" << wrapperMatches.size() << "\r\n"
            << "hook.wrapper_prefix16_rvas=" << JoinRvas(wrapperMatches) << "\r\n"
            << "hook.update_prefix16_count=" << updateMatches.size() << "\r\n"
            << "hook.update_prefix16_rvas=" << JoinRvas(updateMatches) << "\r\n"
-           << "result=report_complete\r\n";
+           << "hook.spatial_filter_prefix18_count=" << spatialFilterMatches.size() << "\r\n"
+           << "hook.spatial_filter_prefix18_rvas=" << JoinRvas(spatialFilterMatches) << "\r\n"
+           << "hook.target_range_filter_prefix19_count=" << targetRangeFilterMatches.size() << "\r\n"
+           << "hook.target_range_filter_prefix19_rvas=" << JoinRvas(targetRangeFilterMatches) << "\r\n";
+    WriteCandidateWindows(report, file, *pe, "wrapper_prefix16", wrapperMatches);
+    WriteCandidateCallers(report, file, *pe, "wrapper_prefix16", wrapperMatches);
+    WriteCandidateWindows(report, file, *pe, "spatial_filter_prefix18", spatialFilterMatches);
+    WriteCandidateWindows(report, file, *pe, "target_range_filter_prefix19", targetRangeFilterMatches);
+
+    // A transparent manual-E wrapper trace on the exact 1.5.3 build returned
+    // to RVA 0x3626DAE. Resolve the PE unwind entry that contains that return
+    // address instead of assuming the callback has the same offset as 1.5.6.
+    constexpr std::uint32_t kManualWrapperReturn153Rva = 0x3626DAEU;
+    report << "trace.manual_wrapper_return_153_rva="
+           << Hex32(kManualWrapperReturn153Rva) << "\r\n";
+    struct RuntimeFunctionEntry {
+        std::uint32_t beginAddress;
+        std::uint32_t endAddress;
+        std::uint32_t unwindInfoAddress;
+    };
+    static_assert(sizeof(RuntimeFunctionEntry) == 12);
+    const auto& exceptionDirectory =
+        pe->headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    const auto exceptionOffset = RvaToOffset(
+        *pe, exceptionDirectory.VirtualAddress, exceptionDirectory.Size, file.size());
+    const RuntimeFunctionEntry* containingFunction = nullptr;
+    if (exceptionOffset &&
+        exceptionDirectory.Size % sizeof(RuntimeFunctionEntry) == 0) {
+        const auto* entries = reinterpret_cast<const RuntimeFunctionEntry*>(
+            file.data() + *exceptionOffset);
+        const std::size_t entryCount =
+            exceptionDirectory.Size / sizeof(RuntimeFunctionEntry);
+        for (std::size_t index = 0; index < entryCount; ++index) {
+            if (kManualWrapperReturn153Rva >= entries[index].beginAddress &&
+                kManualWrapperReturn153Rva < entries[index].endAddress) {
+                containingFunction = &entries[index];
+                break;
+            }
+        }
+    }
+    if (containingFunction != nullptr) {
+        report << "trace.containing_function_153_begin_rva="
+               << Hex32(containingFunction->beginAddress) << "\r\n"
+               << "trace.containing_function_153_end_rva="
+               << Hex32(containingFunction->endAddress) << "\r\n"
+               << "trace.containing_function_153_unwind_rva="
+               << Hex32(containingFunction->unwindInfoAddress) << "\r\n";
+        constexpr std::size_t kContainingFunctionWindowSize = 512;
+        const auto functionOffset = RvaToOffset(
+            *pe, containingFunction->beginAddress,
+            kContainingFunctionWindowSize, file.size());
+        if (functionOffset) {
+            report << "trace.containing_function_153_bytes512="
+                   << Hex(file.data() + *functionOffset,
+                          kContainingFunctionWindowSize) << "\r\n";
+        } else {
+            report << "trace.containing_function_153_bytes512=unmapped\r\n";
+        }
+    } else {
+        report << "trace.containing_function_153_begin_rva=not_found\r\n";
+    }
+
+    const bool isExact153 = known != nullptr &&
+        known->name == "game_1_5_3_candidate";
+    const std::uint32_t mappedSpatialFilterRva =
+        isExact153 ? 0x368D4E0U : 0x36A9870U;
+    const std::uint32_t mappedTargetRangeFilterRva =
+        isExact153 ? 0x368D640U : 0x36A99D0U;
+    report << "reach.mapping_profile="
+           << (isExact153 ? "game_1_5_3" : "steam_reference") << "\r\n"
+           << "reach.spatial_filter_rva=" << Hex32(mappedSpatialFilterRva) << "\r\n"
+           << "reach.target_range_filter_rva="
+           << Hex32(mappedTargetRangeFilterRva) << "\r\n";
+    WriteCandidateCallers(report, file, *pe, "reach_spatial_filter",
+                          std::vector<std::uint32_t>{mappedSpatialFilterRva});
+    WriteCandidateCallers(report, file, *pe, "reach_target_range_filter",
+                          std::vector<std::uint32_t>{mappedTargetRangeFilterRva});
+    report << "result=report_complete\r\n";
     report.close();
 
-    std::wcout << L"Compatibility report created:\n" << reportPath << L"\n\n"
-               << L"The game executable was only read and was not modified.\n";
     return 0;
 }
 
+struct ReportSummary {
+    std::string fileName{"unknown"};
+    std::string knownBuild{"unknown_or_modified"};
+    std::string profileHint{"unknown_odyssey_build"};
+    std::string assessment{"unknown_requires_manual_mapping"};
+    bool supported{};
+    bool binaryProfileSupported{};
+    bool runtimeFilenameSupported{};
+    unsigned signatureUnique{};
+    unsigned signatureAmbiguous{};
+    unsigned signatureMissing{};
+    unsigned hookUnique{};
+    unsigned hookAmbiguous{};
+    unsigned hookMissing{};
+    std::array<std::string, 5> signatureStates{};
+    std::array<std::string, 4> hookStates{};
+};
+
+std::vector<std::string> ReadReportLines(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(line);
+    }
+    return lines;
+}
+std::optional<std::string> ReportValue(const std::vector<std::string>& lines,
+                                       std::string_view key) {
+    const std::string prefix = std::string(key) + '=';
+    for (const auto& line : lines) {
+        if (line.rfind(prefix, 0) == 0) return line.substr(prefix.size());
+    }
+    return std::nullopt;
+}
+
+unsigned ReportCount(const std::vector<std::string>& lines, std::string_view key) {
+    const auto value = ReportValue(lines, key);
+    if (!value) return 0;
+    try {
+        return static_cast<unsigned>(std::stoul(*value));
+    } catch (...) {
+        return 0;
+    }
+}
+
+std::string CandidateState(unsigned count) {
+    if (count == 1) return "unique";
+    if (count > 1) return "ambiguous";
+    return "missing";
+}
+
+void ClassifyCandidateCount(unsigned count, unsigned& unique,
+                            unsigned& ambiguous, unsigned& missing) {
+    if (count == 1) ++unique;
+    else if (count > 1) ++ambiguous;
+    else ++missing;
+}
+ReportSummary SummarizeReport(const std::filesystem::path& path) {
+    const auto lines = ReadReportLines(path);
+    ReportSummary summary{};
+    if (const auto value = ReportValue(lines, "file_name")) summary.fileName = *value;
+    if (const auto value = ReportValue(lines, "known_build")) summary.knownBuild = *value;
+    summary.supported = ReportValue(lines, "currently_supported").value_or("false") == "true";
+    summary.binaryProfileSupported = ReportValue(lines, "binary_profile_supported").value_or("false") == "true";
+    summary.runtimeFilenameSupported = ReportValue(lines, "runtime_filename_supported").value_or("false") == "true";
+
+    constexpr std::array<std::string_view, 5> signatures{{
+        "interaction_wrapper", "game_update", "get_targeting",
+        "get_selected", "interaction_emitter"}};
+    for (std::size_t index = 0; index < signatures.size(); ++index) {
+        const auto name = signatures[index];
+        const std::string base = "signature." + std::string(name);
+        const unsigned exact = ReportCount(lines, base + ".exact48_count");
+        const unsigned masked = ReportCount(lines, base + ".masked48_count");
+        const unsigned effective = exact != 0 ? exact : masked;
+        summary.signatureStates[index] = CandidateState(effective);
+        ClassifyCandidateCount(effective, summary.signatureUnique,
+                               summary.signatureAmbiguous, summary.signatureMissing);
+    }
+
+    constexpr std::array<std::string_view, 4> hooks{{
+        "hook.wrapper_prefix16_count", "hook.update_prefix16_count",
+        "hook.spatial_filter_prefix18_count", "hook.target_range_filter_prefix19_count"}};
+    for (std::size_t index = 0; index < hooks.size(); ++index) {
+        const unsigned count = ReportCount(lines, hooks[index]);
+        summary.hookStates[index] = CandidateState(count);
+        ClassifyCandidateCount(count, summary.hookUnique, summary.hookAmbiguous, summary.hookMissing);
+    }
+
+    const bool recognized = summary.knownBuild != "unknown_or_modified";
+    if (recognized) summary.profileHint = summary.knownBuild;
+    else if (summary.fileName == "ACOdyssey_plus.exe")
+        summary.profileHint = "gamepass_or_ubisoft_plus_unknown";
+
+    if (summary.supported) summary.assessment = "recognized_supported";
+    else if (recognized && summary.binaryProfileSupported && !summary.runtimeFilenameSupported)
+        summary.assessment = "recognized_binary_profile_runtime_name_unsupported";
+    else if (recognized) summary.assessment = "recognized_unsupported_candidate";
+    else if (summary.signatureUnique >= 2 || summary.hookUnique >= 1)
+        summary.assessment = "unknown_partially_mappable";
+    return summary;
+}
+
+void AppendPrefixedReport(std::ofstream& report, const std::filesystem::path& path,
+                          std::size_t index) {
+    for (const auto& line : ReadReportLines(path)) {
+        if (line.empty() || line == "AutoLoot compatibility report" ||
+            line.rfind("tool_version=", 0) == 0 || line == "read_only=true") continue;
+        report << "scan." << index << '.' << line << "\r\n";
+    }
+}
+void WriteSummary(std::ofstream& report, const ReportSummary& summary, std::size_t index) {
+    const bool recognized = summary.knownBuild != "unknown_or_modified";
+    report << "summary." << index << ".file_name=" << summary.fileName << "\r\n"
+           << "summary." << index << ".recognized=" << (recognized ? "true" : "false") << "\r\n"
+           << "summary." << index << ".supported=" << (summary.supported ? "true" : "false") << "\r\n"
+           << "summary." << index << ".binary_profile_supported=" << (summary.binaryProfileSupported ? "true" : "false") << "\r\n"
+           << "summary." << index << ".runtime_filename_supported=" << (summary.runtimeFilenameSupported ? "true" : "false") << "\r\n"
+           << "summary." << index << ".profile_hint=" << summary.profileHint << "\r\n"
+           << "summary." << index << ".signature_unique=" << summary.signatureUnique << "\r\n"
+           << "summary." << index << ".signature_ambiguous=" << summary.signatureAmbiguous << "\r\n"
+           << "summary." << index << ".signature_missing=" << summary.signatureMissing << "\r\n"
+           << "summary." << index << ".hook_unique=" << summary.hookUnique << "\r\n"
+           << "summary." << index << ".hook_ambiguous=" << summary.hookAmbiguous << "\r\n"
+           << "summary." << index << ".hook_missing=" << summary.hookMissing << "\r\n"
+           << "summary." << index << ".known_build=" << summary.knownBuild << "\r\n"
+           << "summary." << index << ".porting_assessment=" << summary.assessment << "\r\n";
+    constexpr std::array<std::string_view, 5> signatureNames{{"interaction_wrapper", "game_update", "get_targeting", "get_selected", "interaction_emitter"}};
+    for (std::size_t item = 0; item < signatureNames.size(); ++item)
+        report << "summary." << index << ".signature." << signatureNames[item] << '=' << summary.signatureStates[item] << "\r\n";
+    constexpr std::array<std::string_view, 4> hookNames{{"wrapper_prefix16", "update_prefix16", "spatial_filter_prefix18", "target_range_filter_prefix19"}};
+    for (std::size_t item = 0; item < hookNames.size(); ++item)
+        report << "summary." << index << ".hook." << hookNames[item] << '=' << summary.hookStates[item] << "\r\n";
+}
+
+void AddIfPresent(std::vector<std::filesystem::path>& paths,
+                  const std::filesystem::path& candidate) {
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(candidate, error)) return;
+    if (std::find(paths.begin(), paths.end(), candidate) == paths.end()) paths.push_back(candidate);
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
     const std::filesystem::path toolDirectory = ModuleDirectory();
-    const std::filesystem::path executablePath = argc >= 2
-        ? std::filesystem::path(argv[1])
-        : toolDirectory / kGameExecutable;
-    return Run(executablePath, toolDirectory / kReportName);
+    std::vector<std::filesystem::path> executables;
+    const bool explicitMode = argc >= 2;
+    if (explicitMode) {
+        for (int index = 1; index < argc; ++index) AddIfPresent(executables, argv[index]);
+    } else {
+        for (const auto name : kGameExecutables) AddIfPresent(executables, toolDirectory / name);
+    }
+
+    const std::filesystem::path reportPath = toolDirectory / kReportName;
+    if (executables.empty()) {
+        std::ofstream report(reportPath, std::ios::binary | std::ios::trunc);
+        report << "AutoLoot compatibility report\r\n"
+               << "tool_version=" << kToolVersion << "\r\nread_only=true\r\n"
+               << "scan_mode=" << (explicitMode ? "explicit" : "automatic") << "\r\n"
+               << "scan_count=0\r\n"
+               << "expected_file_names=ACOdyssey.exe,ACOdyssey_plus.exe\r\n"
+               << "result=error\r\nerror=no_game_executable_found\r\n";
+        std::wcerr << L"No ACOdyssey.exe or ACOdyssey_plus.exe found next to the checker.\n";
+        return 3;
+    }
+    std::vector<std::filesystem::path> temporaryReports;
+    std::vector<ReportSummary> summaries;
+    std::vector<int> statuses;
+    for (std::size_t index = 0; index < executables.size(); ++index) {
+        const auto temp = toolDirectory /
+            (L".AutoLootCompatibilityReport." + std::to_wstring(index) + L".tmp");
+        statuses.push_back(Run(executables[index], temp));
+        temporaryReports.push_back(temp);
+        summaries.push_back(SummarizeReport(temp));
+    }
+
+    std::ofstream report(reportPath, std::ios::binary | std::ios::trunc);
+    if (!report) {
+        std::wcerr << L"Cannot create report: " << reportPath << L"\n";
+        return 2;
+    }
+    report << "AutoLoot compatibility report\r\n"
+           << "tool_version=" << kToolVersion << "\r\n"
+           << "read_only=true\r\n"
+           << "scan_mode=" << (explicitMode ? "explicit" : "automatic") << "\r\n"
+           << "scan_count=" << executables.size() << "\r\n"
+           << "expected_file_names=ACOdyssey.exe,ACOdyssey_plus.exe\r\n";
+    bool anyError = false;
+    for (std::size_t index = 0; index < executables.size(); ++index) {
+        report << "scan." << index << ".requested_file_name="
+               << executables[index].filename().string() << "\r\n";
+        AppendPrefixedReport(report, temporaryReports[index], index);
+        WriteSummary(report, summaries[index], index);
+        if (statuses[index] != 0) anyError = true;
+    }
+    report << "result=" << (anyError ? "report_complete_with_errors" : "report_complete") << "\r\n";
+    report.close();
+
+    for (const auto& temp : temporaryReports) {
+        std::error_code error;
+        std::filesystem::remove(temp, error);
+    }
+
+    std::wcout << L"Compatibility report created:\n" << reportPath << L"\n\n"
+               << L"Scanned " << executables.size() << L" executable(s).\n"
+               << L"The game executable files were only read and were not modified.\n";
+    return anyError ? 1 : 0;
 }
