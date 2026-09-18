@@ -1,9 +1,9 @@
-﻿AUTOLOOT COMPATIBILITY CHECK v9
+﻿AUTOLOOT COMPATIBILITY CHECK v13
 
 This tool only reads Assassin's Creed Odyssey executable files. It does not
 start or modify the game, install a hook, change memory, or alter game files.
 
-Version 12 automatically checks both names when they exist in the game folder:
+Version 13 automatically checks both names when they exist in the game folder:
   ACOdyssey.exe
   ACOdyssey_plus.exe
 

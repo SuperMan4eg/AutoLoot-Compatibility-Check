@@ -20,7 +20,7 @@ namespace {
 constexpr std::array<std::wstring_view, 2> kGameExecutables{{L"ACOdyssey.exe", L"ACOdyssey_plus.exe"}};
 constexpr wchar_t kReportName[] = L"AutoLootCompatibilityReport.txt";
 constexpr std::size_t kSha256Size = 32;
-constexpr unsigned kToolVersion = 12;
+constexpr unsigned kToolVersion = 13;
 
 struct KnownBuild {
     std::string_view name;
@@ -52,8 +52,11 @@ constexpr std::array<std::uint8_t, 8> kInstantPrimaryHoldPattern{
     0xF3,0x0F,0x10,0xBF,0x34,0x04,0x00,0x00};
 constexpr std::array<std::uint8_t, 8> kInstantDismantleHoldPattern{
     0xF3,0x0F,0x10,0xBF,0x38,0x04,0x00,0x00};
+constexpr std::array<std::uint8_t, 18> kCorpseLootRequestPattern{
+    0x48,0x83,0xEC,0x68,0x4C,0x8D,0x44,0x24,0x20,
+    0x48,0xC7,0x44,0x24,0x58,0x00,0x00,0x00,0x00};
 
-constexpr std::array<StaticProbe, 33> kStaticProbes{{
+constexpr std::array<StaticProbe, 39> kStaticProbes{{
     {"activation_logic_component", 0x43AD428U},
     {"interact_component", 0x43AA2C0U},
     {"visual", 0x40C28C8U},
@@ -79,6 +82,12 @@ constexpr std::array<StaticProbe, 33> kStaticProbes{{
     {"anim_component", 0x4100438U},
     {"instant_primary_hold_end_load", 0x18E5D2DU},
     {"instant_dismantle_end_load", 0x18E5D3BU},
+    {"corpse_player_kill_event_vtable", 0x43CAA28U},
+    {"corpse_character_entity_vtable", 0x417AB98U},
+    {"corpse_player_only_component_vtable", 0x4417548U},
+    {"corpse_collectible_component_vtable", 0x439D608U},
+    {"corpse_event_dispatch_thunk", 0x00A5DC70U},
+    {"corpse_loot_request_function", 0x02918AE0U},
     {"extended_reach_spatial_filter", 0x36A9870U},
     {"extended_reach_target_range_filter", 0x36A99D0U},
     {"extended_reach_world_transform", 0x00A608C0U},
@@ -518,6 +527,12 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
            << "instant_hold.dismantle.rvas=" << JoinRvas(instantDismantleMatches) << "\r\n";
     WriteCandidateWindows(report, file, *pe, "instant_hold_primary", instantPrimaryMatches, 96);
     WriteCandidateWindows(report, file, *pe, "instant_hold_dismantle", instantDismantleMatches, 96);
+
+    const auto corpseLootRequestMatches = FindExecutableMatches(
+        file, *pe, kCorpseLootRequestPattern.data(), kCorpseLootRequestPattern.size());
+    report << "corpse.loot_request.count=" << corpseLootRequestMatches.size() << "\r\n"
+           << "corpse.loot_request.rvas=" << JoinRvas(corpseLootRequestMatches) << "\r\n";
+    WriteCandidateWindows(report, file, *pe, "corpse_loot_request", corpseLootRequestMatches, 128);
 
     for (const auto& signature : kReferenceSignatures) {
         const auto offset = RvaToOffset(*pe, signature.steamRva, signature.bytes.size(), file.size());
