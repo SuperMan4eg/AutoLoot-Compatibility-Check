@@ -1,10 +1,10 @@
-﻿# AutoLoot Compatibility Check
+# AutoLoot Compatibility Check
 
 This is a read-only diagnostic tool for Assassin's Creed Odyssey AutoLoot.
 It helps the mod author compare official, older, modified, Game Pass, and
 Ubisoft+ builds without asking users to upload copyrighted game executables.
 
-Version 13 automatically scans both supported executable names when present:
+Version 14 automatically scans both supported executable names when present:
 
 - `ACOdyssey.exe`
 - `ACOdyssey_plus.exe`
@@ -36,7 +36,7 @@ change memory, modify an executable, or load the AutoLoot plugin.
 3. Run `Run_AutoLoot_Compatibility_Check.bat`.
 4. Send `AutoLootCompatibilityReport.txt` to the AutoLoot author.
 
-If both executable names are present, v13 scans both automatically. No renaming
+If both executable names are present, v14 scans both automatically. No renaming
 or file-selection step is required.
 
 Advanced users may run `AutoLootCompatibilityCheck.exe` with one or more
@@ -55,3 +55,7 @@ Known unsupported candidates remain disabled until AutoLoot receives a dedicated
 profile and in-game validation.
 
 
+
+## Universal porting mode (v14)
+
+For unknown or modified Odyssey executables, v14 still performs global scans for world AutoLoot signatures, Extended Reach hooks, Instant Hold patterns and corpse loot-request patterns. It also enumerates padded E9 rel32 event-dispatch thunks and resolves their target RVAs/bytes, so a new game build can usually be mapped from one report without releasing a new checker first.

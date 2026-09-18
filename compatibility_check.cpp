@@ -20,7 +20,7 @@ namespace {
 constexpr std::array<std::wstring_view, 2> kGameExecutables{{L"ACOdyssey.exe", L"ACOdyssey_plus.exe"}};
 constexpr wchar_t kReportName[] = L"AutoLootCompatibilityReport.txt";
 constexpr std::size_t kSha256Size = 32;
-constexpr unsigned kToolVersion = 13;
+constexpr unsigned kToolVersion = 14;
 
 struct KnownBuild {
     std::string_view name;
@@ -29,12 +29,13 @@ struct KnownBuild {
     bool supported;
 };
 
-constexpr std::array<KnownBuild, 5> kKnownBuilds{{
+constexpr std::array<KnownBuild, 6> kKnownBuilds{{
     {"steam_1_5_6", "AC327DAD2CBBDD72A3FDA8E99CBEAB9D12AF328363E4F09BC5674BDD36B8C483", 286453072ULL, true},
     {"ubisoft_connect_1_5_6", "3CB92F72823DB2C5EC24B77ADCD2325C9E1C61DBDB3E7EEA87151374F49B1A07", 285838672ULL, true},
     {"game_1_5_3_candidate", "3453FC6A34792F5C1D71053B7BAB7446E700DAF347F2575E1E8B25006F33F400", 285195944ULL, false},
-    {"gamepass_plus_1_5_6_candidate", "422439DA0C0F282B29C6C17F3BDC7B3D81B624B7ACEC2B9C69AED2CA22896560", 501398864ULL, false},
-    {"steam_1_5_6_longer_draw_distance_candidate", "72BEF41A699ED58EE326262FB8621BF118EA9767B5C9B1BC642668F81A738351", 286453072ULL, false},
+    {"gamepass_plus_1_5_6", "422439DA0C0F282B29C6C17F3BDC7B3D81B624B7ACEC2B9C69AED2CA22896560", 501398864ULL, true},
+    {"steam_1_5_6_longer_draw_distance", "72BEF41A699ED58EE326262FB8621BF118EA9767B5C9B1BC642668F81A738351", 286453072ULL, true},
+    {"steam_1_5_6_guaranteed_assassination_horse_speed", "982754229161E190955B95D5EED83129F31C526484718B4158761D0801496D36", 286453072ULL, true},
 }};
 
 struct ReferenceSignature {
@@ -254,6 +255,46 @@ std::vector<std::uint32_t> FindExecutableMatches(const std::vector<std::uint8_t>
             cursor = found + 1;
         }
     }
+    return matches;
+}
+
+std::vector<std::uint32_t> FindPaddedRel32ThunkMatches(
+        const std::vector<std::uint8_t>& file, const PeInfo& pe) {
+    std::vector<std::uint32_t> matches;
+    constexpr std::size_t kThunkSize = 16;
+    constexpr std::size_t kMaxReportedMatches = 64;
+    for (std::uint16_t index = 0; index < pe.sectionCount; ++index) {
+        const auto& section = pe.sections[index];
+        if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 ||
+            section.PointerToRawData >= file.size()) continue;
+        const std::size_t begin = section.PointerToRawData;
+        const std::size_t available = file.size() - begin;
+        const std::size_t length = std::min<std::size_t>(section.SizeOfRawData, available);
+        if (length < kThunkSize) continue;
+        const std::size_t last = begin + length - kThunkSize;
+        for (std::size_t offset = begin; offset <= last; ++offset) {
+            if (file[offset] != 0xE9) continue;
+            bool padded = true;
+            for (std::size_t i = 5; i < kThunkSize; ++i) {
+                if (file[offset + i] != 0xCC) {
+                    padded = false;
+                    break;
+                }
+            }
+            if (!padded) continue;
+            const auto delta = offset - section.PointerToRawData;
+            matches.push_back(section.VirtualAddress + static_cast<std::uint32_t>(delta));
+        }
+    }
+    constexpr std::uint32_t kReferenceCorpseEventDispatchRva = 0x00A5DC70U;
+    std::stable_sort(matches.begin(), matches.end(), [](std::uint32_t lhs, std::uint32_t rhs) {
+        const auto lhsDistance = lhs > kReferenceCorpseEventDispatchRva
+            ? lhs - kReferenceCorpseEventDispatchRva : kReferenceCorpseEventDispatchRva - lhs;
+        const auto rhsDistance = rhs > kReferenceCorpseEventDispatchRva
+            ? rhs - kReferenceCorpseEventDispatchRva : kReferenceCorpseEventDispatchRva - rhs;
+        return lhsDistance < rhsDistance;
+    });
+    if (matches.size() > kMaxReportedMatches) matches.resize(kMaxReportedMatches);
     return matches;
 }
 
@@ -533,6 +574,22 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
     report << "corpse.loot_request.count=" << corpseLootRequestMatches.size() << "\r\n"
            << "corpse.loot_request.rvas=" << JoinRvas(corpseLootRequestMatches) << "\r\n";
     WriteCandidateWindows(report, file, *pe, "corpse_loot_request", corpseLootRequestMatches, 128);
+
+    // Universal corpse fallback: enumerate padded E9 rel32 thunks even on unknown builds.
+    // This is intentionally broader than a profile-specific probe; each target is resolved
+    // and a 128-byte target window is recorded for offline comparison.
+    const auto corpseEventThunkMatches = FindPaddedRel32ThunkMatches(file, *pe);
+    report << "universal.corpse.event_dispatch_thunk.count="
+           << corpseEventThunkMatches.size() << "\r\n"
+           << "universal.corpse.event_dispatch_thunk.rvas="
+           << JoinRvas(corpseEventThunkMatches) << "\r\n";
+    WriteCandidateWindows(report, file, *pe, "universal_corpse_event_dispatch_thunk",
+                          corpseEventThunkMatches, 64);
+    for (std::size_t index = 0; index < corpseEventThunkMatches.size(); ++index) {
+        WriteRel32Resolution(report, file, *pe,
+            "universal.corpse.event_dispatch_thunk." + std::to_string(index),
+            corpseEventThunkMatches[index]);
+    }
 
     for (const auto& signature : kReferenceSignatures) {
         const auto offset = RvaToOffset(*pe, signature.steamRva, signature.bytes.size(), file.size());
