@@ -20,7 +20,7 @@ namespace {
 constexpr std::array<std::wstring_view, 2> kGameExecutables{{L"ACOdyssey.exe", L"ACOdyssey_plus.exe"}};
 constexpr wchar_t kReportName[] = L"AutoLootCompatibilityReport.txt";
 constexpr std::size_t kSha256Size = 32;
-constexpr unsigned kToolVersion = 10;
+constexpr unsigned kToolVersion = 12;
 
 struct KnownBuild {
     std::string_view name;
@@ -47,6 +47,11 @@ struct StaticProbe {
     std::string_view name;
     std::uint32_t steamRva;
 };
+
+constexpr std::array<std::uint8_t, 8> kInstantPrimaryHoldPattern{
+    0xF3,0x0F,0x10,0xBF,0x34,0x04,0x00,0x00};
+constexpr std::array<std::uint8_t, 8> kInstantDismantleHoldPattern{
+    0xF3,0x0F,0x10,0xBF,0x38,0x04,0x00,0x00};
 
 constexpr std::array<StaticProbe, 33> kStaticProbes{{
     {"activation_logic_component", 0x43AD428U},
@@ -502,6 +507,17 @@ int Run(const std::filesystem::path& executablePath, const std::filesystem::path
         WriteRel32Resolution(report, file, *pe,
                              "probe." + std::string(probe.name), probe.steamRva);
     }
+
+    const auto instantPrimaryMatches = FindExecutableMatches(
+        file, *pe, kInstantPrimaryHoldPattern.data(), kInstantPrimaryHoldPattern.size());
+    const auto instantDismantleMatches = FindExecutableMatches(
+        file, *pe, kInstantDismantleHoldPattern.data(), kInstantDismantleHoldPattern.size());
+    report << "instant_hold.primary.count=" << instantPrimaryMatches.size() << "\r\n"
+           << "instant_hold.primary.rvas=" << JoinRvas(instantPrimaryMatches) << "\r\n"
+           << "instant_hold.dismantle.count=" << instantDismantleMatches.size() << "\r\n"
+           << "instant_hold.dismantle.rvas=" << JoinRvas(instantDismantleMatches) << "\r\n";
+    WriteCandidateWindows(report, file, *pe, "instant_hold_primary", instantPrimaryMatches, 96);
+    WriteCandidateWindows(report, file, *pe, "instant_hold_dismantle", instantDismantleMatches, 96);
 
     for (const auto& signature : kReferenceSignatures) {
         const auto offset = RvaToOffset(*pe, signature.steamRva, signature.bytes.size(), file.size());
