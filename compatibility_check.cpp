@@ -48,7 +48,7 @@ struct StaticProbe {
     std::uint32_t steamRva;
 };
 
-constexpr std::array<StaticProbe, 31> kStaticProbes{{
+constexpr std::array<StaticProbe, 33> kStaticProbes{{
     {"activation_logic_component", 0x43AD428U},
     {"interact_component", 0x43AA2C0U},
     {"visual", 0x40C28C8U},
@@ -72,6 +72,8 @@ constexpr std::array<StaticProbe, 31> kStaticProbes{{
     {"eagle_vision_component", 0x43CC248U},
     {"skeleton_component", 0x40FEEE8U},
     {"anim_component", 0x4100438U},
+    {"instant_primary_hold_end_load", 0x18E5D2DU},
+    {"instant_dismantle_end_load", 0x18E5D3BU},
     {"extended_reach_spatial_filter", 0x36A9870U},
     {"extended_reach_target_range_filter", 0x36A99D0U},
     {"extended_reach_world_transform", 0x00A608C0U},
